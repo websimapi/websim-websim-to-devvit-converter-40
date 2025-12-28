@@ -142,6 +142,33 @@ router.get('/api/lookup/avatar/:username', async (req, res) => {
     }
 });
 
+// --- WebSim Search Proxies ---
+router.get('/api/v1/search/assets', async (req, res) => {
+    try {
+        const query = new URLSearchParams(req.query).toString();
+        const response = await fetch(\`https://websim.ai/api/v1/search/assets?\${query}\`);
+        if (!response.ok) return res.status(response.status).json({ error: 'Upstream Error' });
+        const data = await response.json();
+        res.json(data);
+    } catch (e) {
+        console.error('Search Proxy Error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+router.get('/api/v1/search/assets/relevant', async (req, res) => {
+    try {
+        const query = new URLSearchParams(req.query).toString();
+        const response = await fetch(\`https://websim.ai/api/v1/search/assets/relevant?\${query}\`);
+        if (!response.ok) return res.status(response.status).json({ error: 'Upstream Error' });
+        const data = await response.json();
+        res.json(data);
+    } catch (e) {
+        console.error('Search Proxy Error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // --- Avatar Proxy Route (Legacy/Fallback) ---
 router.get('/api/proxy/avatar/:username', async (req, res) => {
     const { username } = req.params;

@@ -46,6 +46,21 @@ export const websimStubsJs = `
                     filter: () => ({ subscribe: () => {}, getList: () => [] })
                 };
             },
+            search: {
+                assets: async (opts) => {
+                    const params = new URLSearchParams();
+                    if (opts.q) params.set('q', opts.q);
+                    if (opts.mime_type_prefix) params.set('mime_type_prefix', opts.mime_type_prefix);
+                    if (opts.limit) params.set('limit', opts.limit);
+                    return fetch('/api/v1/search/assets?' + params.toString()).then(r => r.json());
+                },
+                relevant: async (opts) => {
+                    const params = new URLSearchParams();
+                    if (opts.q) params.set('q', opts.q);
+                    if (opts.limit) params.set('limit', opts.limit);
+                    return fetch('/api/v1/search/assets/relevant?' + params.toString()).then(r => r.json());
+                }
+            },
             upload: async (file) => {
                 // Smart Upload: JSON persistence via Redis, Media via BlobURL (session)
                 try {
