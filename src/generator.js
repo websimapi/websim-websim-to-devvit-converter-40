@@ -41,6 +41,8 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
     const staticFiles = {}; // These go to src/client/public/
     const urlMap = new Map(); // original -> clean filename
 
+    console.log(`[Generator] Generating Zip. Input files: ${Object.keys(assets).length}`);
+    
     // 1. Initial Sort & Clean
     for (const [path, content] of Object.entries(assets)) {
         if (path.includes('..')) continue;

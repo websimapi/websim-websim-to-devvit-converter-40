@@ -4,7 +4,10 @@
 const API_BASE = '/api/v1';
 
 async function makeRequest(endpoint, options = {}) {
-    const response = await fetch(`${API_BASE}${endpoint}`, {
+    const url = `${API_BASE}${endpoint}`;
+    console.log(`[WebSimAPI] Requesting: ${url}`);
+    
+    const response = await fetch(url, {
         ...options,
         headers: {
             'Content-Type': 'application/json',
@@ -14,6 +17,7 @@ async function makeRequest(endpoint, options = {}) {
     
     if (!response.ok) {
         const errorText = await response.text();
+        console.error(`[WebSimAPI] Request Failed: ${url} (${response.status})`, errorText);
         throw new Error(`API Error ${response.status}: ${errorText}`);
     }
     
@@ -75,12 +79,14 @@ export async function getAllProjectRevisions(projectId) {
 }
 
 export async function getAssets(projectId, version) {
+    console.log(`[WebSimAPI] getAssets: Project=${projectId}, Version=${version}`);
     let allAssets = [];
     let nextCursor = null;
     let hasNext = true;
     let page = 0;
     
     while(hasNext && page < 50) { // Safety limit
+        console.log(`[WebSimAPI] Fetching asset page ${page}...`);
         const params = new URLSearchParams();
         params.set('first', '50');
         if (nextCursor) params.set('after', nextCursor);
@@ -90,6 +96,10 @@ export async function getAssets(projectId, version) {
             
             let pageData = [];
             let meta = null;
+
+            // Verbose response structure check
+            console.log(`[WebSimAPI] Page ${page} response keys:`, Object.keys(res));
+            if (res.assets) console.log(`[WebSimAPI] res.assets keys:`, Object.keys(res.assets));
 
             if (Array.isArray(res)) {
                 pageData = res;
@@ -105,6 +115,7 @@ export async function getAssets(projectId, version) {
                 meta = res.meta;
             }
 
+            console.log(`[WebSimAPI] Page ${page} found ${pageData.length} assets.`);
             if (pageData.length > 0) allAssets.push(...pageData);
 
             if (meta && meta.has_next_page && meta.end_cursor) {
@@ -113,12 +124,13 @@ export async function getAssets(projectId, version) {
                 hasNext = false;
             }
         } catch(e) {
-            console.warn("Asset fetch page failed:", e);
+            console.error(`[WebSimAPI] Asset fetch page ${page} failed:`, e);
             hasNext = false;
         }
         page++;
     }
 
+    console.log(`[WebSimAPI] Total assets fetched: ${allAssets.length}`);
     return allAssets;
 }
 
@@ -278,35 +290,40 @@ async function mapLimit(items, limit, fn) {
 }
 
 export async function processAssets(assetList, projectId, version) {
+    console.log(`[WebSimAPI] processAssets: Processing ${assetList?.length || 0} items`);
     const files = {};
     const encoder = new TextEncoder();
 
     if (!assetList || !Array.isArray(assetList)) {
+        console.warn("[WebSimAPI] Invalid assetList provided to processAssets");
         return files;
     }
 
     const processItem = async (asset) => {
-        if (!asset.path) return;
+        if (!asset.path) {
+            console.warn("[WebSimAPI] Skipping asset with no path:", asset);
+            return;
+        }
         
         const path = asset.path.replace(/^(\.|\/)+/, ''); // Clean path
         if (path.endsWith('/')) return; // Skip explicitly marked directories
 
+        console.log(`[WebSimAPI] Processing Asset: ${path} | URL: ${asset.url ? 'Yes' : 'No'}`);
+
         // 1. Try to get content from the list object directly (if populated)
         if (typeof asset.content === 'string' && asset.content.length > 0) {
+            console.log(`[WebSimAPI] ${path} -> Using embedded string content`);
             files[path] = encoder.encode(asset.content);
             return;
         }
 
         if (asset.content && typeof asset.content === 'object') {
+            console.log(`[WebSimAPI] ${path} -> Using embedded JSON content`);
             files[path] = encoder.encode(JSON.stringify(asset.content));
             return;
         }
 
         // 2. Strategy: API Content vs CDN URL
-        // - Text/Code: API Content is safer (avoids CDN caching issues/CORS)
-        // - Relative URLs: Must use API Content
-        // - Absolute URLs: Try CDN first (faster), fallback to API Content
-        
         const isText = /\.(html|js|mjs|jsx|ts|tsx|css|json|txt|md|xml|svg|csv)$/i.test(path);
         const isAbsolute = asset.url && asset.url.startsWith('http');
         
@@ -314,9 +331,16 @@ export async function processAssets(assetList, projectId, version) {
         const tryFetchContent = async () => {
              if (!projectId || !version) return null;
              try {
+                 console.log(`[WebSimAPI] ${path} -> Fetching API content...`);
                  const ab = await getAssetContent(projectId, version, path);
-                 if (ab && ab.byteLength > 0) return new Uint8Array(ab);
-             } catch(e) { }
+                 if (ab && ab.byteLength > 0) {
+                     console.log(`[WebSimAPI] ${path} -> API content fetch success (${ab.byteLength} bytes)`);
+                     return new Uint8Array(ab);
+                 }
+                 console.log(`[WebSimAPI] ${path} -> API content empty/null`);
+             } catch(e) { 
+                 console.warn(`[WebSimAPI] ${path} -> API content fetch error:`, e);
+             }
              return null;
         };
 
@@ -327,6 +351,7 @@ export async function processAssets(assetList, projectId, version) {
                 files[path] = content;
                 return;
             }
+            console.log(`[WebSimAPI] ${path} -> Strategy A (Text/Relative) failed to get content.`);
         }
 
         // Strategy B: Try URL (if absolute)
@@ -335,12 +360,13 @@ export async function processAssets(assetList, projectId, version) {
                 // Add delay jitter to prevent rate limits
                 await new Promise(r => setTimeout(r, Math.random() * 50));
                 
+                console.log(`[WebSimAPI] ${path} -> Fetching CDN: ${asset.url}`);
                 const res = await fetch(asset.url);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 
                 const blob = await res.arrayBuffer();
 
-                // Validate content (prevent HTML 404s masquerading as binaries)
+                // Validate content
                 if (/\.(mp3|wav|ogg|glb|gltf|png|jpg|jpeg|gif)$/i.test(path)) {
                     const contentType = res.headers.get('content-type');
                     if (contentType && (contentType.includes('text/html') || contentType.includes('application/json'))) {
@@ -355,11 +381,12 @@ export async function processAssets(assetList, projectId, version) {
                     }
                 }
                 
+                console.log(`[WebSimAPI] ${path} -> CDN fetch success (${blob.byteLength} bytes)`);
                 files[path] = new Uint8Array(blob);
                 return;
 
             } catch(e) {
-                console.warn(`[Asset Warning] CDN load failed for ${path}, attempting fallback...`, e.message);
+                console.warn(`[WebSimAPI] ${path} -> CDN load failed: ${e.message}. Attempting fallback...`);
                 // Fallback to API Content if CDN failed and we haven't tried it yet
                 if (!isText) { // If isText, we already tried API content in Strategy A
                     const content = await tryFetchContent();
@@ -373,7 +400,7 @@ export async function processAssets(assetList, projectId, version) {
 
         // 4. Default Fail-safes (Empty Placeholders)
         if (isText) {
-             console.warn(`[Asset] Creating empty placeholder for missing code file: ${path}`);
+             console.warn(`[WebSimAPI] ${path} -> FAILED ALL STRATEGIES. Creating placeholder.`);
              files[path] = encoder.encode(`// Missing file: ${path}\n// Failed to download from WebSim.`);
         }
 

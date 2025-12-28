@@ -209,25 +209,32 @@ btnDownload.addEventListener('click', async () => {
 
     try {
         if (uploadedAssets) {
+            console.log("[Main] Using uploaded zip assets.");
             // Use uploaded zip content
             finalAssets = uploadedAssets;
         } else {
             // Fetch from WebSim
             const version = versionSelect.value;
+            console.log(`[Main] Starting Fetch for Project ${currentProjectMeta.project.id} v${version}`);
             toggleLoading(true, 'Downloading assets from WebSim...');
             
             // Fetch assets and HTML independently to prevent HTML 403 blocking assets
             const assetPromise = getAssets(currentProjectMeta.project.id, version);
             const htmlPromise = getProjectHtml(currentProjectMeta.project.id, version).catch(e => {
-                console.warn("HTML fetch failed, will attempt to find index.html in assets.", e);
+                console.error("[Main] HTML fetch failed (non-fatal):", e);
                 return null;
             });
 
             const [assetResponse, htmlContent] = await Promise.all([assetPromise, htmlPromise]);
 
+            console.log(`[Main] Fetched ${assetResponse ? assetResponse.length : 0} assets.`);
+            console.log(`[Main] HTML Content Present: ${!!htmlContent}`);
+
             toggleLoading(true, 'Processing files & generating zip...');
             
             finalAssets = await processAssets(assetResponse, currentProjectMeta.project.id, version);
+            console.log(`[Main] Final Processed Assets Count: ${Object.keys(finalAssets).length}`);
+            console.log(`[Main] Asset Keys:`, Object.keys(finalAssets));
 
             // Inject the fetched HTML as index.html
             if (htmlContent) {
