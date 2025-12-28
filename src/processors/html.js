@@ -114,7 +114,8 @@ export function processHTML(htmlContent, filename, analyzer) {
 
     // 3. Inject Polyfills & Styles
     // We add a style to hide images that are waiting for the avatar injector to prevent broken icon flash
-    const styles = `<style>img[src*="/_websim_avatar_/"] { opacity: 0; transition: opacity 0.2s; }</style>`;
+    // Use single quotes for selector to avoid attribute parsing issues in some environments
+    const styles = `<style>img[src*='/_websim_avatar_/'] { opacity: 0; transition: opacity 0.2s; }</style>`;
     const polyfills = `<script type="module" src="./websim_polyfills.js"></script>`;
     
     if (html.includes('<head>')) {

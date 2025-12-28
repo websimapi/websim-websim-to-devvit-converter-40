@@ -78,6 +78,14 @@ export async function getAllProjectRevisions(projectId) {
     return allRevisions;
 }
 
+export async function getAssetMetadata(projectId, version, path) {
+    try {
+        return await makeRequest(`/projects/${projectId}/revisions/${version}/assets/${encodeURIComponent(path)}`);
+    } catch(e) {
+        return null;
+    }
+}
+
 export async function getAssets(projectId, version) {
     console.log(`[WebSimAPI] getAssets: Project=${projectId}, Version=${version}`);
     let allAssets = [];
@@ -300,68 +308,71 @@ export async function processAssets(assetList, projectId, version) {
     }
 
     const processItem = async (asset) => {
-        if (!asset.path) {
-            console.warn("[WebSimAPI] Skipping asset with no path:", asset);
-            return;
-        }
+        if (!asset.path) return;
         
         const path = asset.path.replace(/^(\.|\/)+/, ''); // Clean path
         if (path.endsWith('/')) return; // Skip explicitly marked directories
 
-        console.log(`[WebSimAPI] Processing Asset: ${path} | URL: ${asset.url ? 'Yes' : 'No'}`);
-
-        // 1. Try to get content from the list object directly (if populated)
+        // 1. Embedded Content (String/JSON)
         if (typeof asset.content === 'string' && asset.content.length > 0) {
-            console.log(`[WebSimAPI] ${path} -> Using embedded string content`);
             files[path] = encoder.encode(asset.content);
             return;
         }
-
         if (asset.content && typeof asset.content === 'object') {
-            console.log(`[WebSimAPI] ${path} -> Using embedded JSON content`);
             files[path] = encoder.encode(JSON.stringify(asset.content));
             return;
         }
 
-        // 2. Strategy: API Content vs CDN URL
         const isText = /\.(html|js|mjs|jsx|ts|tsx|css|json|txt|md|xml|svg|csv)$/i.test(path);
-        const isAbsolute = asset.url && asset.url.startsWith('http');
+        
+        // 2. Identify URL & Metadata Recovery
+        // Sometimes the asset list is sparse, so we check various keys or fetch detailed metadata
+        let url = asset.url || asset.src || asset.uri || asset.download_url;
+        
+        if (!url && !isText) {
+             console.log(`[WebSimAPI] ${path} -> Missing URL, fetching metadata...`);
+             const meta = await getAssetMetadata(projectId, version, path);
+             if (meta) {
+                 url = meta.url || meta.src || meta.download_url;
+                 if (url) {
+                     console.log(`[WebSimAPI] ${path} -> Recovered URL: ${url}`);
+                 } else {
+                     console.warn(`[WebSimAPI] ${path} -> Metadata retrieved but no URL found. Keys:`, Object.keys(meta));
+                 }
+             }
+        }
+
+        const isAbsolute = url && url.startsWith('http');
         
         // Helper to fetch via API Content
         const tryFetchContent = async () => {
              if (!projectId || !version) return null;
              try {
-                 console.log(`[WebSimAPI] ${path} -> Fetching API content...`);
                  const ab = await getAssetContent(projectId, version, path);
-                 if (ab && ab.byteLength > 0) {
-                     console.log(`[WebSimAPI] ${path} -> API content fetch success (${ab.byteLength} bytes)`);
-                     return new Uint8Array(ab);
-                 }
-                 console.log(`[WebSimAPI] ${path} -> API content empty/null`);
+                 if (ab && ab.byteLength > 0) return new Uint8Array(ab);
              } catch(e) { 
-                 console.warn(`[WebSimAPI] ${path} -> API content fetch error:`, e);
+                 console.warn(`[WebSimAPI] ${path} -> API content fetch error:`, e.message);
              }
              return null;
         };
 
-        // Strategy A: Prefer API Content for text OR relative URLs
-        if (isText || !isAbsolute) {
+        // Strategy A: API Content (Text Files)
+        // We prefer API content for text as it's often more up-to-date or cleaner than CDN
+        if (isText) {
             const content = await tryFetchContent();
             if (content) {
                 files[path] = content;
                 return;
             }
-            console.log(`[WebSimAPI] ${path} -> Strategy A (Text/Relative) failed to get content.`);
         }
 
-        // Strategy B: Try URL (if absolute)
+        // Strategy B: CDN URL (Binary / Absolute)
         if (isAbsolute) {
             try {
-                // Add delay jitter to prevent rate limits
+                // Jitter to avoid rate limits
                 await new Promise(r => setTimeout(r, Math.random() * 50));
                 
-                console.log(`[WebSimAPI] ${path} -> Fetching CDN: ${asset.url}`);
-                const res = await fetch(asset.url);
+                const res = await fetch(url);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 
                 const blob = await res.arrayBuffer();
@@ -369,14 +380,15 @@ export async function processAssets(assetList, projectId, version) {
                 // Validate content
                 if (/\.(mp3|wav|ogg|glb|gltf|png|jpg|jpeg|gif)$/i.test(path)) {
                     const contentType = res.headers.get('content-type');
+                    // Sanity check: don't save HTML error pages as MP3s
                     if (contentType && (contentType.includes('text/html') || contentType.includes('application/json'))) {
-                        throw new Error(`Received invalid content-type: ${contentType}`);
+                         throw new Error(`Invalid content-type: ${contentType}`);
                     }
                     if (blob.byteLength > 0) {
                         const header = new Uint8Array(blob.slice(0, 100));
                         const textHeader = new TextDecoder().decode(header).trim().toLowerCase();
-                        if (textHeader.startsWith('<!doctype') || textHeader.startsWith('<html') || textHeader.includes('accessdenied')) {
-                             throw new Error(`Content sniffer detected text/error signature`);
+                        if (textHeader.startsWith('<!doctype') || textHeader.startsWith('<html')) {
+                             throw new Error(`Content sniffer detected HTML signature in binary file`);
                         }
                     }
                 }
@@ -386,16 +398,21 @@ export async function processAssets(assetList, projectId, version) {
                 return;
 
             } catch(e) {
-                console.warn(`[WebSimAPI] ${path} -> CDN load failed: ${e.message}. Attempting fallback...`);
-                // Fallback to API Content if CDN failed and we haven't tried it yet
-                if (!isText) { // If isText, we already tried API content in Strategy A
-                    const content = await tryFetchContent();
-                    if (content) {
-                         files[path] = content;
-                         return;
-                    }
-                }
+                console.warn(`[WebSimAPI] ${path} -> CDN load failed: ${e.message}`);
+                // Proceed to fallback
             }
+        }
+
+        // Strategy C: API Content Fallback (Binary)
+        // If CDN failed or was missing, try the /content endpoint (note: often fails 400 for binary)
+        if (!files[path] && !isText) {
+             console.log(`[WebSimAPI] ${path} -> Attempting API Content Fallback...`);
+             const content = await tryFetchContent();
+             if (content) {
+                 files[path] = content;
+                 console.log(`[WebSimAPI] ${path} -> API Content Fallback Success`);
+                 return;
+             }
         }
 
         // 4. Default Fail-safes (Empty Placeholders)
