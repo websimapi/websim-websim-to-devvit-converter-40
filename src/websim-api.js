@@ -88,23 +88,6 @@ export async function getAssetMetadata(projectId, version, path) {
 
 export async function getAssets(projectId, version) {
     console.log(`[WebSimAPI] getAssets: Project=${projectId}, Version=${version}`);
-    
-    // 1. Fetch Revision Metadata first (contains critical file maps & content)
-    let revisionFiles = {};
-    try {
-        console.log(`[WebSimAPI] Fetching full revision metadata to enrich assets...`);
-        const revRes = await makeRequest(`/projects/${projectId}/revisions/${version}`);
-        const rev = revRes.revision || revRes;
-        
-        // Check for 'files' (common) or 'assets' (sometimes used for maps)
-        if (rev.files) {
-            console.log(`[WebSimAPI] Revision metadata contains ${Object.keys(rev.files).length} files.`);
-            revisionFiles = rev.files;
-        }
-    } catch(e) {
-        console.warn("[WebSimAPI] Failed to fetch revision metadata for asset enrichment (non-fatal):", e);
-    }
-
     let allAssets = [];
     let nextCursor = null;
     let hasNext = true;
@@ -122,6 +105,10 @@ export async function getAssets(projectId, version) {
             let pageData = [];
             let meta = null;
 
+            // Verbose response structure check
+            console.log(`[WebSimAPI] Page ${page} response keys:`, Object.keys(res));
+            if (res.assets) console.log(`[WebSimAPI] res.assets keys:`, Object.keys(res.assets));
+
             if (Array.isArray(res)) {
                 pageData = res;
                 hasNext = false; 
@@ -137,29 +124,7 @@ export async function getAssets(projectId, version) {
             }
 
             console.log(`[WebSimAPI] Page ${page} found ${pageData.length} assets.`);
-            
-            if (pageData.length > 0) {
-                // Enrich assets with Revision Metadata (Fixes missing URLs/Content)
-                const enriched = pageData.map(asset => {
-                    const fname = asset.path ? asset.path.replace(/^\//, '') : '';
-                    // Try exact match or match without leading slash
-                    const revFile = revisionFiles[fname] || revisionFiles['/' + fname] || revisionFiles[asset.path];
-                    
-                    if (revFile) {
-                        // Merge strategies: Prefer Revision URL/Content over Asset List defaults
-                        const merged = { ...asset, ...revFile };
-                        
-                        // Ensure critical fields are promoted
-                        merged.url = revFile.url || revFile.src || revFile.download_url || asset.url || asset.src || asset.download_url;
-                        if (revFile.content !== undefined) merged.content = revFile.content;
-                        
-                        return merged;
-                    }
-                    return asset;
-                });
-                
-                allAssets.push(...enriched);
-            }
+            if (pageData.length > 0) allAssets.push(...pageData);
 
             if (meta && meta.has_next_page && meta.end_cursor) {
                 nextCursor = meta.end_cursor;
@@ -173,22 +138,7 @@ export async function getAssets(projectId, version) {
         page++;
     }
 
-    // Also inject any files found in Revision but missing from Asset List (e.g. index.html sometimes)
-    const existingPaths = new Set(allAssets.map(a => a.path ? a.path.replace(/^\//, '') : ''));
-    Object.entries(revisionFiles).forEach(([key, val]) => {
-        const cleanKey = key.replace(/^\//, '');
-        if (!existingPaths.has(cleanKey)) {
-            console.log(`[WebSimAPI] Injecting missing asset from revision: ${cleanKey}`);
-            allAssets.push({
-                path: cleanKey,
-                ...val,
-                url: val.url || val.src || val.download_url
-            });
-            existingPaths.add(cleanKey);
-        }
-    });
-
-    console.log(`[WebSimAPI] Total assets (after enrichment): ${allAssets.length}`);
+    console.log(`[WebSimAPI] Total assets fetched: ${allAssets.length}`);
     return allAssets;
 }
 
@@ -379,20 +329,28 @@ export async function processAssets(assetList, projectId, version) {
         // Sometimes the asset list is sparse, so we check various keys or fetch detailed metadata
         let url = asset.url || asset.src || asset.uri || asset.download_url;
         
+        // Prefer our new CDN-style URL pattern when WebSim doesn't give us one
+        // Example: https://iur9h4n4su3ibzjwudyq.c.websim.com/success.mp3?v=76&t=1766724292663
+        if (!url && !isText && projectId && version) {
+            const filename = path.split('/').pop();
+            if (filename) {
+                const ts = Date.now();
+                url = `https://${projectId}.c.websim.com/${encodeURIComponent(filename)}?v=${version}&t=${ts}`;
+                console.log(`[WebSimAPI] ${path} -> Synthesized CDN URL: ${url}`);
+            }
+        }
+        
+        // Legacy fallback: try metadata endpoint only if we still failed to get a URL
         if (!url && !isText) {
-             console.log(`[WebSimAPI] ${path} -> Missing URL, fetching metadata...`);
-             try {
-                 const meta = await getAssetMetadata(projectId, version, path);
-                 if (meta) {
-                     url = meta.url || meta.src || meta.download_url;
-                     if (url) {
-                         console.log(`[WebSimAPI] ${path} -> Recovered URL: ${url}`);
-                     } else {
-                         console.warn(`[WebSimAPI] ${path} -> Metadata retrieved but no URL found.`);
-                     }
+             console.log(`[WebSimAPI] ${path} -> Missing URL, fetching metadata (legacy path)...`);
+             const meta = await getAssetMetadata(projectId, version, path);
+             if (meta) {
+                 url = meta.url || meta.src || meta.download_url;
+                 if (url) {
+                     console.log(`[WebSimAPI] ${path} -> Recovered URL from metadata: ${url}`);
+                 } else {
+                     console.warn(`[WebSimAPI] ${path} -> Metadata retrieved but no URL found. Keys:`, Object.keys(meta));
                  }
-             } catch(e) {
-                 console.warn(`[WebSimAPI] ${path} -> Metadata fetch failed (${e.message}). Skipping.`);
              }
         }
 
