@@ -420,29 +420,19 @@ export async function processAssets(assetList, projectId, version) {
             }
         }
 
-        // Strategy B: CDN URL (Constructed or Absolute)
-        // We prioritize the constructed CDN URL as it's more direct/reliable than API or metadata URL
-        const cdnUrl = `https://${projectId}.c.websim.ai/${path.split('/').map(encodeURIComponent).join('/')}?v=${version}`;
-        const urlsToTry = [];
-        
-        // Add CDN URL first
-        urlsToTry.push(cdnUrl);
-        // Add original URL if exists and different
-        if (isAbsolute && url !== cdnUrl) urlsToTry.push(url);
-
-        for (const targetUrl of urlsToTry) {
+        // Strategy B: CDN URL (Binary / Absolute)
+        if (isAbsolute) {
             try {
                 // Jitter to avoid rate limits
                 await new Promise(r => setTimeout(r, Math.random() * 50));
                 
-                console.log(`[WebSimAPI] Fetching: ${targetUrl}`);
-                const res = await fetch(targetUrl);
+                const res = await fetch(url);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 
                 const blob = await res.arrayBuffer();
 
                 // Validate content
-                if (/\.(mp3|wav|ogg|glb|gltf|png|jpg|jpeg|gif|mp4)$/i.test(path)) {
+                if (/\.(mp3|wav|ogg|glb|gltf|png|jpg|jpeg|gif)$/i.test(path)) {
                     const contentType = res.headers.get('content-type');
                     // Sanity check: don't save HTML error pages as MP3s
                     if (contentType && (contentType.includes('text/html') || contentType.includes('application/json'))) {
@@ -457,13 +447,13 @@ export async function processAssets(assetList, projectId, version) {
                     }
                 }
                 
-                console.log(`[WebSimAPI] ${path} -> Fetch success (${blob.byteLength} bytes) from ${targetUrl}`);
+                console.log(`[WebSimAPI] ${path} -> CDN fetch success (${blob.byteLength} bytes)`);
                 files[path] = new Uint8Array(blob);
                 return;
 
             } catch(e) {
-                console.warn(`[WebSimAPI] ${path} -> Fetch failed from ${targetUrl}: ${e.message}`);
-                // Try next URL
+                console.warn(`[WebSimAPI] ${path} -> CDN load failed: ${e.message}`);
+                // Proceed to fallback
             }
         }
 
